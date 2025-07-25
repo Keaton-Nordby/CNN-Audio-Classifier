@@ -13,6 +13,7 @@ import torchaudio.transforms as T
 import torch.optim as optim
 from torch.optim.lr_scheduler import OneCycleLR
 from tqdm import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 from model import AudioCNN
 
@@ -96,6 +97,11 @@ def mixup_criterion(criterion, pred, y_a, y_b, lam):
 
 @app.function(image=image, gpu="A10G", volumes={"/data": volume, "/models": model_volume}, timeout=60 * 60 * 3)
 def train():
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = f'/models/tensorboard_logs/run_{timestamp}'
+    writer = SummaryWriter(log_dir)
+
     esc50_dir = Path("/opt/esc50-data")
     train_transform = nn.Sequential(
         T.MelSpectrogram(
@@ -126,7 +132,7 @@ def train():
     train_dataset = ESC50Dataset(
         data_dir=esc50_dir, metadata_file=esc50_dir / "meta" / "esc50.csv", split="train", transform=train_transform)
     val_dataset = ESC50Dataset(
-        data_dir=esc50_dir, metadata_file=esc50_dir / "meta" / "esc50.csv", split="val", transform=val_transform)
+        data_dir=esc50_dir, metadata_file=esc50_dir / "meta" / "esc50.csv", split="test", transform=val_transform)
     
     print(f"Training samples: {len(train_dataset)}")
 
@@ -180,6 +186,10 @@ def train():
             progress_bar.set_postfix({'Loss': f'{loss.item():.4f}'})
         
         avg_epoch_loss = epoch_loss / len(train_dataloader)
+        writer.add_scalar('Loss/Train', avg_epoch_loss, epoch)
+        writer.add_scalar(
+            'Learing_Rate', optimizer.param_groups[0]['lr'], epoch)
+
 
         # validation after each epoch
         model.eval()
@@ -192,7 +202,7 @@ def train():
             for data, target in test_loader:
                 data, target = data.to(device), target.to(device)
                 outputs = model(data)
-                loss = criterion(data)
+                loss = criterion(outputs, target)
                 val_loss += loss.item()
 
                 _, predicted = torch.max(outputs.data, 1)
@@ -201,6 +211,9 @@ def train():
         
         accuracy = 100 * correct / total
         avg_val_loss = val_loss / len(test_loader)
+
+        writer.add_scalar('Loss/Validation', avg_val_loss, epoch)
+        writer.add_scalar('Accuracy/Validation', accuracy, epoch)
         
         print(
             f'Epoch {epoch+1} Loss: {avg_epoch_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.2f}%')
@@ -214,6 +227,8 @@ def train():
                 'classes': train_dataset.classes
             }, '/models/best_model.pth')
             print(f'New best model saved: {accuracy:.2f}%')
+    
+    writer.close()
     print(f'Training completed! Best accuracy: {best_accuracy:.2f}%')
 
 

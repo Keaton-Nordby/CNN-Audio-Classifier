@@ -3,3 +3,4 @@ torchaudio
 torch
 tqdm
 numpy
+tensorboard
