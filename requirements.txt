@@ -6,3 +6,5 @@ numpy
 tensorboard
 fastapi
 librosa
+pydantic
+soundfile
