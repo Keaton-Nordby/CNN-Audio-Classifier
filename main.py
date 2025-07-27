@@ -78,14 +78,15 @@ class AudioClassifier:
         if audio_data.ndim > 1:
             audio_data = np.mean(audio_data, axis=1)
         
-        if sample_rate != 22050:
-            audio_data = librosa.resample(y=audio_data, orig_sr=sample_rate, target_sr=22050)
+        if sample_rate != 44100:
+            audio_data = librosa.resample(y=audio_data, orig_sr=sample_rate, target_sr=44100)
 
         spectrogram = self.audio_processor.process_audio_chunk(audio_data)
         spectrogram = spectrogram.to(self.device)
 
         with torch.no_grad():
-            output = self.model(spectrogram)
+            output, feature_maps = self.model(
+                spectrogram, return_feature_maps=True)
 
             output = torch.nan_to_num(output)
             probabilities = torch.softmax(output, dim=1) # dim 0, dim 1 = class (batch_size, num_class)
@@ -96,27 +97,67 @@ class AudioClassifier:
             predictions = [{"class": self.classes[idx.item()], "confidence": prob.item()} 
                            for prob, idx in zip(top3_probs, top3_indicies)]
             
+            viz_data = {}
+            for name, tensor in feature_maps.items():
+                if tensor.dim() == 4: # reason for 4 is because it should have a batch_size, channels, height, width
+                    aggregated_tensor = torch.mean(tensor, dim=1)
+                    squeezed_tensor = aggregated_tensor.squeeze(0)
+                    numpy_array = squeezed_tensor.cpu().numpy()
+                    clean_array = np.nan_to_num(numpy_array)
+                    viz_data[name] = {
+                        "shape": list(clean_array.shape),
+                        "values": clean_array.tolist()
+                    }
+            # [batch, channel, height, width]
+            spectrogram_np = spectrogram.squeeze(0).squeeze(0).cpu().numpy()
+            clean_spectrogram = np.nan_to_num(spectrogram_np)
+
+            max_samples = 8000
+            if len(audio_data) > max_samples:
+                step = len(audio_data) // max_samples
+                waveform_data = audio_data[::step]
+            else:
+                waveform_data = audio_data
+
         response = {
-            "predictions": predictions
+            "predictions": predictions,
+            "visualization": viz_data,
+            "input_spectrogram": {
+                "shape": list(clean_spectrogram.shape),
+                "values": clean_spectrogram.tolist()
+            },
+            "waveform": {
+                "values": waveform_data.tolist(),
+                "sample_rate": 22050,
+                "duration": len(audio_data) / 22050
+            }
         }
 
         return response
     
 @app.local_entrypoint()
 def main():
-    audio_data, sample_rate = sf.read("chirping_birds.wav")
+    audio_data, sample_rate = sf.read("horns.wav")
 
     buffer = io.BytesIO()
-    sf.write(buffer, audio_data, 22050, format="WAV")
+    sf.write(buffer, audio_data, sample_rate, format="WAV")
     audio_b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
     payload = {"audio_data": audio_b64}
 
     server = AudioClassifier()
     url = server.inference.get_web_url()
-    reponse = requests.post(url, json=payload)
-    reponse.raise_for_status()
+    response = requests.post(url, json=payload)
+    response.raise_for_status()
 
-    result = reponse.json()
+    result = response.json()
+
+    waveform_info = result.get("waveform", {})
+    if waveform_info:
+        values = waveform_info.get("values", {})
+        print(f"First 10 values: {[round(v, 4) for v in values[:10]]}...")
+        print(f"Duration: {waveform_info.get('duration', 0)} seconds")
+
+
     print('Top predictions:')
     for pred in result.get("predictions", []):
         print(f" -{pred['class']} {pred['confidence']:0.2%}")
